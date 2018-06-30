@@ -50,7 +50,7 @@ type CallResponse struct {
 
 	Error *struct {
 		IsClientSafe bool   `json:"isClientSafe"`
-		Error        int    `json:"error"`
+		Error        string    `json:"error"`
 		Reason       string `json:"reason"`
 		Message      string `json:"message"`
 		ErrorType    string `json:"errorType"`
