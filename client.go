@@ -228,9 +228,9 @@ func (c *Client) UnSubscribe(collection *Collection) error {
 	c.callMapMutex.Lock()
 
 	call := &Call{
-		Type:             CallTypeUnSub,
-		ID:               collection.ID,
-		done:             make(chan struct{}),
+		Type: CallTypeUnSub,
+		ID:   collection.ID,
+		done: make(chan struct{}),
 	}
 
 	c.callMap[call.ID] = call
@@ -249,13 +249,13 @@ func (c *Client) UnSubscribe(collection *Collection) error {
 
 	collection, exists := c.subMap[collection.Name]
 	if exists {
-		delete(c.subMap,collection.Name)
+		delete(c.subMap, collection.Name)
 	}
 
 	return nil
 }
 
-func (c *Client) GetCollectionByName(name string) (*Collection) {
+func (c *Client) GetCollectionByName(name string) *Collection {
 	c.subMapMutex.RLock()
 	defer c.subMapMutex.RUnlock()
 

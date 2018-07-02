@@ -26,7 +26,7 @@ func (c *Collection) FireChangeEvent(event CollectionChangedEvent) {
 
 type CollectionChangedEvent struct {
 	CollectionName string `json:"collection"`
-	Fields struct {
+	Fields         struct {
 		EventName string        `json:"eventName"`
 		Args      []interface{} `json:"args"`
 	} `json:"fields"`

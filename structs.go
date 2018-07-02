@@ -19,6 +19,7 @@ const (
 	CallTypeConnect    CallType = "connect"
 	CallTypeConnected  CallType = "connected"
 	CallTypeSub        CallType = "sub"
+	CallTypeUnSub      CallType = "unsub"
 	CallTypeSubReady   CallType = "ready"
 	CallTypeSubChanged CallType = "changed"
 	CallTypeNoSub      CallType = "nosub"
@@ -43,14 +44,14 @@ type CallResponse struct {
 	Result     interface{} `json:"result"`
 	Subs       []string    `json:"subs"`
 	Collection string      `json:"collection"`
-	Fields struct {
+	Fields     struct {
 		EventName string        `json:"eventName"`
 		Args      []interface{} `json:"args"`
 	} `json:"fields"`
 
 	Error *struct {
 		IsClientSafe bool   `json:"isClientSafe"`
-		Error        string    `json:"error"`
+		Error        string `json:"error"`
 		Reason       string `json:"reason"`
 		Message      string `json:"message"`
 		ErrorType    string `json:"errorType"`
