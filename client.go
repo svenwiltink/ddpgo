@@ -21,8 +21,8 @@ type Client struct {
 	callMap      map[string]*Call
 	callMapMutex sync.Mutex
 
-	subMap 		map[string]*Collection
-	subMapMutex sync.Mutex
+	subMap      map[string]*Collection
+	subMapMutex sync.RWMutex
 
 	connectRequest *ConnectMessage
 }
@@ -52,36 +52,76 @@ func (c *Client) Connect() error {
 func (c *Client) startReadLoop() {
 	for {
 		_, data, err := c.connection.ReadMessage()
-
-		log.Printf("<- %+v", string(data))
-
 		if err != nil {
 			log.Println(err)
-			continue
+			return
 		}
 
-		response := &CallResponse{}
-		err = json.Unmarshal(data, response)
+		// spawn a different goroutine to prevent deadlocking when waiting for multiple calls
+		go c.handleMessage(data)
 
-		if err != nil {
-			log.Println(err)
-			continue
+	}
+}
+
+// handle an individual message
+func (c *Client) handleMessage(data []byte) {
+	log.Printf("<- %+v", string(data))
+
+	response := &CallResponse{}
+	err := json.Unmarshal(data, response)
+
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	switch response.Type {
+	case CallTypePing:
+		c.sendJson(Call{Type: CallTypePong})
+	case CallTypeConnected:
+		{
+			c.connectRequest.Response = response
+			c.connectRequest.done <- struct{}{}
 		}
+	case CallTypeResult:
+		{
+			c.callMapMutex.Lock()
 
-		switch response.Type {
-		case CallTypePing:
-			c.sendJson(Call{Type: CallTypePong})
-		case CallTypeConnected:
-			{
-				c.connectRequest.Response = response
-				c.connectRequest.done <- struct{}{}
+			call, ok := c.callMap[response.ID]
+			delete(c.callMap, response.ID)
+
+			c.callMapMutex.Unlock()
+
+			if !ok {
+				log.Printf("unable to find call request for id %s", response.ID)
+				return
 			}
-		case CallTypeResult:
-			{
-				c.callMapMutex.Lock()
-				call, ok := c.callMap[response.ID]
+
+			call.Response = response
+			call.done <- struct{}{}
+		}
+	case CallTypeNoSub:
+		c.callMapMutex.Lock()
+
+		call, ok := c.callMap[response.ID]
+		delete(c.callMap, response.ID)
+		c.callMapMutex.Unlock()
+
+		if !ok {
+			log.Printf("unable to find call request for id %s", response.ID)
+			return
+		}
+
+		call.Response = response
+		call.done <- struct{}{}
+
+	case CallTypeSubReady:
+		{
+			c.callMapMutex.Lock()
+
+			for _, callId := range response.Subs {
+				call, ok := c.callMap[callId]
 				delete(c.callMap, response.ID)
-				c.callMapMutex.Unlock()
 
 				if !ok {
 					log.Printf("unable to find call request for id %s", response.ID)
@@ -91,60 +131,28 @@ func (c *Client) startReadLoop() {
 				call.Response = response
 				call.done <- struct{}{}
 			}
-		case CallTypeNoSub:
-			c.callMapMutex.Lock()
 
-			call, ok := c.callMap[response.ID]
-			delete(c.callMap, response.ID)
 			c.callMapMutex.Unlock()
-
-			if !ok {
-				log.Printf("unable to find call request for id %s", response.ID)
-				continue
-			}
-
-			call.Response = response
-			call.done <- struct{}{}
-
-		case CallTypeSubReady:
-			{
-				c.callMapMutex.Lock()
-
-				for _, callId := range response.Subs {
-					call, ok := c.callMap[callId]
-					delete(c.callMap, response.ID)
-
-					if !ok {
-						log.Printf("unable to find call request for id %s", response.ID)
-						continue
-					}
-
-					call.Response = response
-					call.done <- struct{}{}
-				}
-
-				c.callMapMutex.Unlock()
-			}
-		case CallTypeSubChanged:
-			{
-				c.subMapMutex.Lock()
-				collection, exists := c.subMap[response.Collection]
-				if !exists {
-					c.subMapMutex.Unlock()
-					log.Printf("unable to find collection for sub %s", response.Collection)
-					continue
-				}
-
-				collection.FireChangeEvent(CollectionChangedEvent{
-					Fields: response.Fields,
-					CollectionName: response.Collection,
-				})
-
-				c.subMapMutex.Unlock()
-			}
-		default:
-
 		}
+	case CallTypeSubChanged:
+		{
+			c.subMapMutex.RLock()
+			collection, exists := c.subMap[response.Collection]
+			if !exists {
+				c.subMapMutex.RUnlock()
+				log.Printf("unable to find collection for sub %s", response.Collection)
+				return
+			}
+
+			collection.FireChangeEvent(CollectionChangedEvent{
+				Fields:         response.Fields,
+				CollectionName: response.Collection,
+			})
+
+			c.subMapMutex.RUnlock()
+		}
+	default:
+
 	}
 }
 
@@ -181,6 +189,7 @@ func (c *Client) CallMethod(method string, data ...interface{}) (interface{}, er
 	return call.Response.Result, nil
 }
 
+// subscribe to a collection. Once subscribed you can add an event handler
 func (c *Client) Subscribe(subscriptionName string, args ...interface{}) (*Collection, error) {
 	c.callMapMutex.Lock()
 
@@ -216,8 +225,8 @@ func (c *Client) Subscribe(subscriptionName string, args ...interface{}) (*Colle
 }
 
 func (c *Client) GetCollectionByName(name string) (*Collection) {
-	c.subMapMutex.Lock()
-	defer c.subMapMutex.Unlock()
+	c.subMapMutex.RLock()
+	defer c.subMapMutex.RUnlock()
 
 	collection, _ := c.subMap[name]
 	return collection
@@ -244,7 +253,7 @@ func NewClient(url url.URL) *Client {
 	return &Client{
 		url:     url,
 		callMap: make(map[string]*Call),
-		subMap: make(map[string]*Collection),
+		subMap:  make(map[string]*Collection),
 	}
 }
 
