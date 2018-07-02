@@ -5,6 +5,7 @@ import "sync"
 type CollectionChangedEventHandler func(event CollectionChangedEvent)
 
 type Collection struct {
+	ID                        string
 	Name                      string
 	changedEventHandlers      []CollectionChangedEventHandler
 	changedEventHandlersMutex sync.Mutex
@@ -31,9 +32,10 @@ type CollectionChangedEvent struct {
 	} `json:"fields"`
 }
 
-func NewCollection(name string) *Collection {
+func NewCollection(id string, name string) *Collection {
 	return &Collection{
-		Name: name,
+		ID:                   id,
+		Name:                 name,
 		changedEventHandlers: make([]CollectionChangedEventHandler, 0),
 	}
 }

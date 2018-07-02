@@ -217,11 +217,42 @@ func (c *Client) Subscribe(subscriptionName string, args ...interface{}) (*Colle
 
 	collection, exists := c.subMap[subscriptionName]
 	if !exists {
-		collection = NewCollection(subscriptionName)
+		collection = NewCollection(call.ID, subscriptionName)
 		c.subMap[subscriptionName] = collection
 	}
 
 	return collection, nil
+}
+
+func (c *Client) UnSubscribe(collection *Collection) error {
+	c.callMapMutex.Lock()
+
+	call := &Call{
+		Type:             CallTypeUnSub,
+		ID:               collection.ID,
+		done:             make(chan struct{}),
+	}
+
+	c.callMap[call.ID] = call
+	c.sendJson(call)
+
+	c.callMapMutex.Unlock()
+
+	<-call.done
+
+	if call.Response.Type != "nosub" {
+		return errors.New("already unsubbed")
+	}
+
+	c.subMapMutex.Lock()
+	defer c.subMapMutex.Unlock()
+
+	collection, exists := c.subMap[collection.Name]
+	if exists {
+		delete(c.subMap,collection.Name)
+	}
+
+	return nil
 }
 
 func (c *Client) GetCollectionByName(name string) (*Collection) {
