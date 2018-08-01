@@ -9,11 +9,15 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 )
 
 type Client struct {
-	mutex       sync.Mutex
-	connection  *websocket.Conn
+	mutex sync.Mutex
+
+	connection      *websocket.Conn
+	connectionMutex sync.Mutex
+
 	url         url.URL
 	lastNr      int
 	lastNrMutex sync.Mutex
@@ -39,6 +43,7 @@ func (c *Client) Connect() error {
 	c.connection = conn
 	conn.SetCloseHandler(c.onConnectionClose)
 	go c.startReadLoop()
+	go c.startPingLoop()
 
 	connectMsg := c.newConnectMessage()
 	c.connectRequest = connectMsg
@@ -60,6 +65,13 @@ func (c *Client) startReadLoop() {
 		// spawn a different goroutine to prevent deadlocking when waiting for multiple calls
 		go c.handleMessage(data)
 
+	}
+}
+
+func (c *Client) startPingLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	for range ticker.C {
+		c.sendJson(Call{Type: CallTypePing})
 	}
 }
 
@@ -265,6 +277,9 @@ func (c *Client) GetCollectionByName(name string) *Collection {
 
 // send data to the connection
 func (c *Client) sendJson(data interface{}) error {
+	c.connectionMutex.Lock()
+	defer c.connectionMutex.Unlock()
+
 	dataString, _ := json.Marshal(data)
 	log.Printf("-> %+v", string(dataString))
 	return c.connection.WriteJSON(data)
