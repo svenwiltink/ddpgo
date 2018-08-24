@@ -58,8 +58,14 @@ func (c *Client) startReadLoop() {
 	for {
 		_, data, err := c.connection.ReadMessage()
 		if err != nil {
-			log.Println(err)
-			return
+			if websocket.IsCloseError(err) {
+				closeError := err.(*websocket.CloseError)
+				c.onConnectionClose(closeError.Code, closeError.Text)
+				return
+			}
+
+			log.Printf("Error reading message: %s", err)
+			continue
 		}
 
 		// spawn a different goroutine to prevent deadlocking when waiting for multiple calls
@@ -173,7 +179,7 @@ func (c *Client) newConnectMessage() *ConnectMessage {
 }
 
 func (c *Client) onConnectionClose(code int, text string) error {
-	log.Println("connection closed")
+	log.Printf("Connection closed: %d: %s", code, text)
 	return nil
 }
 
