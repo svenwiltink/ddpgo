@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"github.com/svenwiltink/ddpgo"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
@@ -12,68 +14,47 @@ import (
 
 var client *ddpgo.Client
 
+var subscription *ddpgo.Subscription
+
 func main() {
-	client = ddpgo.NewClient(url.URL{Host: "*rocketchat host*"})
+	// we need a webserver to get the pprof webserver
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
+	client = ddpgo.NewClient(url.URL{Host: "server"})
 	err := client.Connect()
 
 	if err != nil {
 		panic(err)
 	}
 
-	digest := sha256.Sum256([]byte("*password*"))
+	digest := sha256.Sum256([]byte("pass"))
 
-	response, err := client.CallMethod("login", ddpLoginRequest{
-		User:     ddpUser{Email: "", Username: "*username*"},
-		Password: ddpPassword{Digest: hex.EncodeToString(digest[:]), Algorithm: "sha-256"}})
+	err = client.Login(ddpgo.Credentials{
+		User:     ddpgo.User{Email: "", Username: "user"},
+		Password: ddpgo.Password{Digest: hex.EncodeToString(digest[:]), Algorithm: "sha-256"}})
 
 	if err != nil {
 		log.Println(err)
 	}
 
-	response, err = client.CallMethod("rooms/get")
+	response, err := client.CallMethod("rooms/get")
 	log.Println(response)
 
-	_, err = client.Subscribe("stream-room-messages", "GENERAL", false)
+	subscription, err = client.Subscribe("stream-room-messages", "GENERAL", false)
 	if err != nil {
 		log.Println(err)
 	}
 
 	client.GetCollectionByName("stream-room-messages").AddChangedEventHandler(handleMessage)
 
-	client.CallMethod("sendMessage", struct {
-		RID string `json:"rid"`
-		MSG string `json:"msg"`
-	}{
-		"GENERAL",
-		"hello?",
-	})
-
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt)
 	<-done
 }
 
-type ddpLoginRequest struct {
-	User     ddpUser     `json:"user"`
-	Password ddpPassword `json:"password"`
-}
-
-type ddpUser struct {
-	Email    string `json:"email,omitempty"`
-	Username string `json:"username,omitempty"`
-}
-
-type ddpPassword struct {
-	Digest    string `json:"digest"`
-	Algorithm string `json:"algorithm"`
-}
-
-func handleMessage(_ ddpgo.CollectionChangedEvent) {
-	client.CallMethod("sendMessage", struct {
-		RID string `json:"rid"`
-		MSG string `json:"msg"`
-	}{
-		"GENERAL",
-		"hello?",
-	})
+func handleMessage(event ddpgo.CollectionChangedEvent) {
+	//client.UnSubscribe(subscription)
+	client.Reconnect()
 }
