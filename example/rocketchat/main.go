@@ -14,8 +14,6 @@ import (
 
 var client *ddpgo.Client
 
-var subscription *ddpgo.Subscription
-
 func main() {
 	// we need a webserver to get the pprof webserver
 	go func() {
@@ -42,7 +40,7 @@ func main() {
 	response, err := client.CallMethod("rooms/get")
 	log.Println(response)
 
-	subscription, err = client.Subscribe("stream-room-messages", "GENERAL", false)
+	_, err = client.Subscribe("stream-room-messages", "GENERAL", false)
 	if err != nil {
 		log.Println(err)
 	}

@@ -62,12 +62,12 @@ func (c *Client) Connect() error {
 func (c *Client) connect() error {
 	conn, response, err := websocket.DefaultDialer.Dial(c.url.String(), nil)
 
-	if response.StatusCode >= 300 {
-		return fmt.Errorf("unable to connect to %s: Statuscode %d", c.url.String(), response.StatusCode)
-	}
-
 	if err != nil {
 		return err
+	}
+
+	if response.StatusCode >= 300 {
+		return fmt.Errorf("unable to connect to %s: Statuscode %d", c.url.String(), response.StatusCode)
 	}
 
 	c.connection = conn
@@ -84,16 +84,21 @@ func (c *Client) connect() error {
 	return nil
 }
 
-func (c *Client) Login(credentials Credentials) error {
+func (c *Client) Login(credentials Credentials) (interface{}, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	return c.login(credentials)
 }
 
-func (c *Client) login(credentials Credentials) error {
+func (c *Client) login(credentials Credentials) (interface{}, error) {
 	c.credentials = credentials
-	_, err := c.CallMethod("login", credentials)
-	return fmt.Errorf("unable to login: %v", err)
+	result, err := c.CallMethod("login", credentials)
+
+	if err != nil {
+		return nil, fmt.Errorf("unable to login: %v", err)
+	}
+
+	return result, nil
 }
 
 func (c *Client) startReadLoop() {
