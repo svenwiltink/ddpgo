@@ -108,6 +108,7 @@ func (c *Client) startReadLoop() {
 		case <-c.stopReadLoop:
 			return
 		default:
+			c.connection.SetReadDeadline(time.Now().Add(20 * time.Second))
 			_, data, err := c.connection.ReadMessage()
 			if err != nil {
 				if c.status != ClientStatusConnected {
