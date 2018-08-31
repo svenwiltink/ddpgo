@@ -1,5 +1,11 @@
 package ddpgo
 
+type Subscription struct {
+	ID             string
+	CollectionName string
+	Parameters     []interface{}
+}
+
 // CallMethod contains the common fields that all DDP messages use.
 type Call struct {
 	Type CallType `json:"msg"`
@@ -51,9 +57,24 @@ type CallResponse struct {
 
 	Error *struct {
 		IsClientSafe bool   `json:"isClientSafe"`
-		Error        string `json:"error"`
+		Error        int    `json:"error"`
 		Reason       string `json:"reason"`
 		Message      string `json:"message"`
 		ErrorType    string `json:"errorType"`
 	}
+}
+
+type Credentials struct {
+	User     User     `json:"user"`
+	Password Password `json:"password"`
+}
+
+type User struct {
+	Email    string `json:"email,omitempty"`
+	Username string `json:"username,omitempty"`
+}
+
+type Password struct {
+	Digest    string `json:"digest"`
+	Algorithm string `json:"algorithm"`
 }

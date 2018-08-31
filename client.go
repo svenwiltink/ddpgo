@@ -12,6 +12,15 @@ import (
 	"time"
 )
 
+type ClientStatus int
+
+const (
+	ClientStatusIdle ClientStatus = iota
+	ClientStatusConnected
+	ClientStatusReconnecting
+	ClientStatusStopping
+)
+
 type Client struct {
 	mutex sync.Mutex
 
@@ -19,29 +28,49 @@ type Client struct {
 	connectionMutex sync.Mutex
 
 	url         url.URL
+	credentials Credentials
+
 	lastNr      int
 	lastNrMutex sync.Mutex
 
 	callMap      map[string]*Call
 	callMapMutex sync.Mutex
 
-	subMap      map[string]*Collection
-	subMapMutex sync.RWMutex
+	collectionMap      map[string]*Collection
+	collectionMapMutex sync.RWMutex
+
+	// a map containing a map of subscriptions per collection.
+	// map[collectionName]map[subscriptionId]*Subscription
+	subscriptionMap      map[string]map[string]*Subscription
+	subscriptionMapMutex sync.Mutex
 
 	connectRequest *ConnectMessage
+
+	stopPingLoop chan struct{}
+	stopReadLoop chan struct{}
+
+	status ClientStatus
 }
 
 func (c *Client) Connect() error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	conn, _, err := websocket.DefaultDialer.Dial(c.url.String(), nil)
+
+	return c.connect()
+}
+
+func (c *Client) connect() error {
+	conn, response, err := websocket.DefaultDialer.Dial(c.url.String(), nil)
 
 	if err != nil {
 		return err
 	}
 
+	if response.StatusCode >= 300 {
+		return fmt.Errorf("unable to connect to %s: Statuscode %d", c.url.String(), response.StatusCode)
+	}
+
 	c.connection = conn
-	conn.SetCloseHandler(c.onConnectionClose)
 	go c.startReadLoop()
 	go c.startPingLoop()
 
@@ -51,33 +80,64 @@ func (c *Client) Connect() error {
 	c.sendJson(connectMsg)
 
 	<-connectMsg.done
+	c.status = ClientStatusConnected
 	return nil
 }
 
+func (c *Client) Login(credentials Credentials) (interface{}, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.login(credentials)
+}
+
+func (c *Client) login(credentials Credentials) (interface{}, error) {
+	c.credentials = credentials
+	result, err := c.CallMethod("login", credentials)
+
+	if err != nil {
+		return nil, fmt.Errorf("unable to login: %v", err)
+	}
+
+	return result, nil
+}
+
 func (c *Client) startReadLoop() {
+
 	for {
-		_, data, err := c.connection.ReadMessage()
-		if err != nil {
-			if websocket.IsCloseError(err) {
-				closeError := err.(*websocket.CloseError)
-				c.onConnectionClose(closeError.Code, closeError.Text)
-				return
+		select {
+		case <-c.stopReadLoop:
+			return
+		default:
+			c.connection.SetReadDeadline(time.Now().Add(20 * time.Second))
+			_, data, err := c.connection.ReadMessage()
+			if err != nil {
+				if c.status != ClientStatusConnected {
+					log.Printf("ignoring error %+v because we are reconnecting", err)
+					continue
+				}
+
+				log.Printf("Error reading message: %s", err)
+				c.connection.Close()
+				go c.Reconnect()
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
 
-			log.Printf("Error reading message: %s", err)
-			continue
+			// spawn a different goroutine to prevent deadlocking when waiting for multiple calls
+			go c.handleMessage(data)
 		}
-
-		// spawn a different goroutine to prevent deadlocking when waiting for multiple calls
-		go c.handleMessage(data)
-
 	}
 }
 
 func (c *Client) startPingLoop() {
 	ticker := time.NewTicker(10 * time.Second)
-	for range ticker.C {
-		c.sendJson(Call{Type: CallTypePing})
+	for {
+		select {
+		case <-ticker.C:
+			c.sendJson(Call{Type: CallTypePing})
+		case <-c.stopPingLoop:
+			return
+		}
 	}
 }
 
@@ -154,10 +214,11 @@ func (c *Client) handleMessage(data []byte) {
 		}
 	case CallTypeSubChanged:
 		{
-			c.subMapMutex.RLock()
-			collection, exists := c.subMap[response.Collection]
+			c.collectionMapMutex.RLock()
+			collection, exists := c.collectionMap[response.Collection]
+			c.collectionMapMutex.RUnlock()
+
 			if !exists {
-				c.subMapMutex.RUnlock()
 				log.Printf("unable to find collection for sub %s", response.Collection)
 				return
 			}
@@ -166,8 +227,6 @@ func (c *Client) handleMessage(data []byte) {
 				Fields:         response.Fields,
 				CollectionName: response.Collection,
 			})
-
-			c.subMapMutex.RUnlock()
 		}
 	default:
 
@@ -176,11 +235,6 @@ func (c *Client) handleMessage(data []byte) {
 
 func (c *Client) newConnectMessage() *ConnectMessage {
 	return &ConnectMessage{Call: Call{Type: CallTypeConnect, done: make(chan struct{})}, Version: "1", Support: []string{"1"}}
-}
-
-func (c *Client) onConnectionClose(code int, text string) error {
-	log.Printf("Connection closed: %d: %s", code, text)
-	return nil
 }
 
 func (c *Client) CallMethod(method string, data ...interface{}) (interface{}, error) {
@@ -208,7 +262,7 @@ func (c *Client) CallMethod(method string, data ...interface{}) (interface{}, er
 }
 
 // subscribe to a collection. Once subscribed you can add an event handler
-func (c *Client) Subscribe(subscriptionName string, args ...interface{}) (*Collection, error) {
+func (c *Client) Subscribe(subscriptionName string, args ...interface{}) (*Subscription, error) {
 	c.callMapMutex.Lock()
 
 	call := &Call{
@@ -230,24 +284,45 @@ func (c *Client) Subscribe(subscriptionName string, args ...interface{}) (*Colle
 		return nil, errors.New("nosub returned by server")
 	}
 
-	c.subMapMutex.Lock()
-	defer c.subMapMutex.Unlock()
+	// create a collection if this is the first subscription for it
+	c.collectionMapMutex.Lock()
+	defer c.collectionMapMutex.Unlock()
 
-	collection, exists := c.subMap[subscriptionName]
+	collection, exists := c.collectionMap[subscriptionName]
 	if !exists {
 		collection = NewCollection(call.ID, subscriptionName)
-		c.subMap[subscriptionName] = collection
+		c.collectionMap[subscriptionName] = collection
 	}
 
-	return collection, nil
+	c.subscriptionMapMutex.Lock()
+	defer c.subscriptionMapMutex.Unlock()
+
+	subscription := &Subscription{
+		ID:             call.ID, // the id of the subscription is the same one as generated for the call.
+		CollectionName: subscriptionName,
+		Parameters:     args,
+	}
+
+	// create map for the collections if it doesn't exist yet.
+	subscriptionList, exists := c.subscriptionMap[subscriptionName]
+	if !exists {
+		subscriptionList = make(map[string]*Subscription)
+	}
+
+	subscriptionList[subscription.ID] = subscription
+	c.subscriptionMap[subscriptionName] = subscriptionList
+
+	return subscription, nil
 }
 
-func (c *Client) UnSubscribe(collection *Collection) error {
+// Try to unsub from rocketchat and remove the subscription from the map
+// TODO: remove the collection if there are no more subscriptions for it.
+func (c *Client) UnSubscribe(subscription *Subscription) error {
 	c.callMapMutex.Lock()
 
 	call := &Call{
 		Type: CallTypeUnSub,
-		ID:   collection.ID,
+		ID:   subscription.ID,
 		done: make(chan struct{}),
 	}
 
@@ -259,25 +334,27 @@ func (c *Client) UnSubscribe(collection *Collection) error {
 	<-call.done
 
 	if call.Response.Type != "nosub" {
-		return errors.New("already unsubbed")
+		log.Printf("already unsubbed from subscripton %v", subscription)
 	}
 
-	c.subMapMutex.Lock()
-	defer c.subMapMutex.Unlock()
+	c.subscriptionMapMutex.Lock()
+	defer c.subscriptionMapMutex.Unlock()
 
-	collection, exists := c.subMap[collection.Name]
-	if exists {
-		delete(c.subMap, collection.Name)
+	subscriptionList, exists := c.subscriptionMap[subscription.CollectionName]
+	if !exists {
+		return nil
 	}
+
+	delete(subscriptionList, subscription.ID)
 
 	return nil
 }
 
 func (c *Client) GetCollectionByName(name string) *Collection {
-	c.subMapMutex.RLock()
-	defer c.subMapMutex.RUnlock()
+	c.collectionMapMutex.RLock()
+	defer c.collectionMapMutex.RUnlock()
 
-	collection, _ := c.subMap[name]
+	collection, _ := c.collectionMap[name]
 	return collection
 }
 
@@ -289,6 +366,85 @@ func (c *Client) sendJson(data interface{}) error {
 	dataString, _ := json.Marshal(data)
 	log.Printf("-> %+v", string(dataString))
 	return c.connection.WriteJSON(data)
+}
+
+// ddp needs a unique identifier for each message. The client keeps track of the last identifier used
+// and increments it by one every time this function is called
+func (c *Client) getNextMessageNumber() string {
+	c.lastNrMutex.Lock()
+	defer c.lastNrMutex.Unlock()
+
+	c.lastNr = c.lastNr + 1
+	return strconv.Itoa(c.lastNr)
+}
+
+func (c *Client) Close() error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.status != ClientStatusConnected {
+		return fmt.Errorf("can't close the client in status %v", c.status)
+	}
+
+	c.status = ClientStatusStopping
+
+	c.connection.Close()
+	c.stopReadLoop <- struct{}{}
+	c.stopPingLoop <- struct{}{}
+	return nil
+}
+
+func (c *Client) Reconnect() error {
+	c.status = ClientStatusReconnecting
+	log.Println("Reconnecting")
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.connection.Close()
+	c.stopReadLoop <- struct{}{}
+	c.stopPingLoop <- struct{}{}
+
+	for i := 1; ; i++ {
+		log.Println("trying to connect")
+		err := c.connect()
+
+		if err == nil {
+			break
+		}
+
+		log.Printf("unable to reconnect: %s", err)
+
+		if i >= 10 {
+			log.Println("giving up on rocketchat")
+			return errors.New("reconnect timed out")
+		}
+
+		pause := 10 * time.Second
+		log.Printf("trying again in %s", pause)
+		time.Sleep(pause)
+
+	}
+
+	c.login(c.credentials) // login using the stored credentials
+	c.subscriptionMapMutex.Lock()
+
+	subscriptions := make([]*Subscription, 0)
+	for _, subscriptionMap := range c.subscriptionMap {
+		for _, subscription := range subscriptionMap {
+			subscriptions = append(subscriptions, subscription)
+		}
+	}
+
+	// reset the map so only the new subscriptions will be in it
+	c.subscriptionMap = make(map[string]map[string]*Subscription)
+	c.subscriptionMapMutex.Unlock()
+
+	for _, subscription := range subscriptions {
+		c.Subscribe(subscription.CollectionName, subscription.Parameters...)
+	}
+
+	return nil
 }
 
 // Creates a new ddp client. The path and scheme values of the URL are optional. By default
@@ -303,18 +459,12 @@ func NewClient(url url.URL) *Client {
 	}
 
 	return &Client{
-		url:     url,
-		callMap: make(map[string]*Call),
-		subMap:  make(map[string]*Collection),
+		url:             url,
+		callMap:         make(map[string]*Call),
+		collectionMap:   make(map[string]*Collection),
+		subscriptionMap: make(map[string]map[string]*Subscription),
+		stopPingLoop:    make(chan struct{}),
+		stopReadLoop:    make(chan struct{}),
+		status:          ClientStatusIdle,
 	}
-}
-
-// ddp needs a unique identifier for each message. The client keeps track of the last identifier used
-// and increments it by one every time this function is called
-func (c *Client) getNextMessageNumber() string {
-	c.lastNrMutex.Lock()
-	defer c.lastNrMutex.Unlock()
-
-	c.lastNr = c.lastNr + 1
-	return strconv.Itoa(c.lastNr)
 }
